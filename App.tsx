@@ -23,21 +23,25 @@ import {
   Link,
   Timer,
   Trophy,
-  BarChart2
+  BarChart2,
+  Network,
+  RotateCcw,
+  Shield
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_SETTINGS, SUGGESTED_MODELS, TRANSLATIONS } from './constants';
-import { AppSettings, Message, ModelOption, Provider, SpeedTestResult, ViewState } from './types';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_SETTINGS, SUGGESTED_MODELS, TRANSLATIONS, DEFAULT_CORS_PROXY } from './constants';
+import { AppSettings, Message, ModelOption, Provider, SpeedTestResult, ViewState, ProviderConfig } from './types';
 import { 
   generateOpenAIContent, 
   generateAnthropicContent, 
   fetchOpenAIModels,
   fetchGeminiModels,
+  fetchAnthropicModels,
   generateGeminiContentRest
 } from './services/externalServices';
 
-import { Button, Input, Select, Card, Badge, SegmentedControl, Textarea } from './ui';
+import { Button, Input, Select, Card, Badge, SegmentedControl, Textarea, Switch } from './ui';
 
 const SidebarItem = ({ 
   active, 
@@ -96,8 +100,9 @@ export default function App() {
       setSettings({
           ...DEFAULT_SETTINGS,
           ...parsed,
-          language: parsed.language || 'en',
-          theme: parsed.theme || 'dark'
+          google: { ...DEFAULT_SETTINGS.google, ...(parsed.google || {}) },
+          openai: { ...DEFAULT_SETTINGS.openai, ...(parsed.openai || {}) },
+          anthropic: { ...DEFAULT_SETTINGS.anthropic, ...(parsed.anthropic || {}) }
       });
     } else if (process.env.API_KEY) {
       setSettings(prev => ({
@@ -137,6 +142,21 @@ export default function App() {
      return TRANSLATIONS[lang][key] || TRANSLATIONS['en'][key];
   };
 
+  const getEffectiveBaseUrl = (config: ProviderConfig) => {
+    if (!settings.corsProxy) return config.baseUrl;
+    
+    const proxy = settings.corsProxy.trim();
+    const target = config.baseUrl;
+
+    // If proxy ends with delimiters like =, ?, or /, simply append
+    if (proxy.endsWith('=') || proxy.endsWith('?') || proxy.endsWith('/')) {
+        return `${proxy}${target}`;
+    }
+
+    // Otherwise, assume it's a path-based proxy (like Cloudflare Workers) and add a slash
+    return `${proxy}/${target}`;
+  };
+
   const saveSettings = () => {
     localStorage.setItem('omni_settings_v2', JSON.stringify(settings));
     localStorage.setItem('omni_models', JSON.stringify(availableModels));
@@ -148,21 +168,25 @@ export default function App() {
     setTimeout(() => setFeedbackMsg(null), 6000);
   };
 
+  const isProviderEnabled = (provider: Provider) => {
+    if (provider === Provider.GOOGLE) return settings.google.enabled;
+    if (provider === Provider.OPENAI) return settings.openai.enabled;
+    if (provider === Provider.ANTHROPIC) return settings.anthropic.enabled;
+    return false;
+  };
+
   // --- Logic ---
 
   const fetchModelsForProvider = async (provider: Provider) => {
     try {
       let newModels: ModelOption[] = [];
-      let config;
       
       if (provider === Provider.OPENAI) {
-        config = settings.openai;
-        newModels = await fetchOpenAIModels(config.baseUrl, config.apiKey);
+        newModels = await fetchOpenAIModels(getEffectiveBaseUrl(settings.openai), settings.openai.apiKey);
       } else if (provider === Provider.GOOGLE) {
-        config = settings.google;
-        newModels = await fetchGeminiModels(config.baseUrl, config.apiKey);
-      } else {
-        throw new Error("Auto-fetch not supported for Claude. Add manually.");
+        newModels = await fetchGeminiModels(getEffectiveBaseUrl(settings.google), settings.google.apiKey);
+      } else if (provider === Provider.ANTHROPIC) {
+        newModels = await fetchAnthropicModels(getEffectiveBaseUrl(settings.anthropic), settings.anthropic.apiKey);
       }
 
       if (newModels.length > 0) {
@@ -179,7 +203,7 @@ export default function App() {
     } catch (e: any) {
       console.error(e);
       if (e.message.includes("CORS")) {
-        showFeedback("CORS Error. See Warning.", 'error');
+        showFeedback("CORS Error. Try setting a Proxy.", 'error');
       } else {
         showFeedback(`Fetch Failed: ${e.message}`, 'error');
       }
@@ -224,6 +248,11 @@ export default function App() {
         return;
     }
 
+    if (!isProviderEnabled(model.provider)) {
+      showFeedback(`${model.provider} is disabled. Enable it in Settings.`, 'error');
+      return;
+    }
+
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -248,11 +277,11 @@ export default function App() {
     try {
       let result;
       if (model.provider === Provider.GOOGLE) {
-        result = await generateGeminiContentRest(settings.google.baseUrl, settings.google.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
+        result = await generateGeminiContentRest(getEffectiveBaseUrl(settings.google), settings.google.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
       } else if (model.provider === Provider.OPENAI) {
-        result = await generateOpenAIContent(settings.openai.baseUrl, settings.openai.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
+        result = await generateOpenAIContent(getEffectiveBaseUrl(settings.openai), settings.openai.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
       } else if (model.provider === Provider.ANTHROPIC) {
-        result = await generateAnthropicContent(settings.anthropic.baseUrl, settings.anthropic.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
+        result = await generateAnthropicContent(getEffectiveBaseUrl(settings.anthropic), settings.anthropic.apiKey, model.id, userMsg.content, DEFAULT_SYSTEM_PROMPT);
       }
 
       if (result) {
@@ -270,15 +299,17 @@ export default function App() {
   };
 
   const runSpeedTest = async () => {
-    if (availableModels.length === 0) {
-        showFeedback(t('noModels'), "error");
+    const activeModels = availableModels.filter(m => isProviderEnabled(m.provider));
+
+    if (activeModels.length === 0) {
+        showFeedback("No models available from enabled providers", "error");
         return;
     }
     setIsTesting(true);
     setTestResults([]);
     const prompt = "Ping";
 
-    for (const model of availableModels) {
+    for (const model of activeModels) {
       setTestResults(prev => [...prev, {
         id: model.id,
         provider: model.provider,
@@ -291,11 +322,11 @@ export default function App() {
       try {
         let res;
         if (model.provider === Provider.GOOGLE) {
-             res = await generateGeminiContentRest(settings.google.baseUrl, settings.google.apiKey, model.id, prompt);
+             res = await generateGeminiContentRest(getEffectiveBaseUrl(settings.google), settings.google.apiKey, model.id, prompt);
         } else if (model.provider === Provider.OPENAI) {
-             res = await generateOpenAIContent(settings.openai.baseUrl, settings.openai.apiKey, model.id, prompt);
+             res = await generateOpenAIContent(getEffectiveBaseUrl(settings.openai), settings.openai.apiKey, model.id, prompt);
         } else if (model.provider === Provider.ANTHROPIC) {
-             res = await generateAnthropicContent(settings.anthropic.baseUrl, settings.anthropic.apiKey, model.id, prompt);
+             res = await generateAnthropicContent(getEffectiveBaseUrl(settings.anthropic), settings.anthropic.apiKey, model.id, prompt);
         }
 
         setTestResults(prev => prev.map(r => 
@@ -310,7 +341,7 @@ export default function App() {
     setIsTesting(false);
   };
 
-  // --- Render Helpers for Speed Test ---
+  // --- Render Functions ---
 
   const getSpeedStats = () => {
     const successful = testResults.filter(r => r.status === 'success');
@@ -322,10 +353,6 @@ export default function App() {
     
     return { fastest, avgLatency, avgTtft, count: successful.length };
   };
-
-  const maxLatency = Math.max(...testResults.filter(r => r.status === 'success').map(r => r.latency), 1);
-
-  // --- Render Views ---
 
   const renderSettings = () => (
     <div className="p-6 max-w-5xl mx-auto h-full overflow-y-auto pb-24">
@@ -364,38 +391,83 @@ export default function App() {
         </div>
       </Card>
 
-      {/* CORS Warning */}
-      <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 mb-8 text-sm flex items-start gap-4">
-          <div className="p-2 bg-amber-100 dark:bg-amber-900/40 rounded-lg text-amber-600 dark:text-amber-400 shrink-0">
-             <AlertTriangle size={24} />
-          </div>
-          <div>
-             <strong className="block mb-1 text-amber-800 dark:text-amber-300 text-base">{t('corsTitle')}</strong>
-             <p className="text-amber-700 dark:text-amber-400/80 leading-relaxed">{t('corsDesc')}</p>
-             <div className="flex flex-col gap-1 mt-2 text-amber-800 dark:text-amber-400 opacity-90">
-                <span className="flex items-center gap-2"><CheckCircle size={12}/> {t('corsOption1')}</span>
-                <span className="flex items-center gap-2"><CheckCircle size={12}/> <strong>{t('corsOption2')}</strong></span>
+      {/* Network Settings (CORS Proxy) */}
+      <Card className="mb-8">
+         <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+            <Network size={20} className="text-blue-500"/> 
+            {t('networkTitle')}
+         </h3>
+         
+         <div className="flex flex-col md:flex-row gap-6 items-start">
+             <div className="flex-1 w-full">
+                <Input 
+                    label={t('proxyLabel')} 
+                    placeholder="e.g. https://corsproxy.io/?url=" 
+                    value={settings.corsProxy} 
+                    onChange={e=>setSettings({...settings, corsProxy: e.target.value})} 
+                    icon={Globe}
+                />
+                
+                {/* Helper Buttons for Proxy */}
+                <div className="flex gap-2 mt-3">
+                  <button 
+                    onClick={() => setSettings(s => ({...s, corsProxy: DEFAULT_CORS_PROXY}))}
+                    className="text-xs px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded border border-slate-200 dark:border-slate-700 flex items-center gap-1 transition-colors"
+                  >
+                    <RotateCcw size={12}/> {t('useDefault')}
+                  </button>
+                  <button 
+                    onClick={() => setSettings(s => ({...s, corsProxy: ''}))}
+                    className="text-xs px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 rounded border border-slate-200 dark:border-slate-700 flex items-center gap-1 transition-colors"
+                  >
+                    <Shield size={12}/> {t('useDirect')}
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">
+                    {t('proxyDesc')}
+                </p>
              </div>
-          </div>
-      </div>
+             
+             {/* CORS Info Box */}
+             <div className="flex-1 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 text-sm flex items-start gap-3">
+                <div className="text-amber-600 dark:text-amber-400 shrink-0 mt-0.5">
+                    <AlertTriangle size={18} />
+                </div>
+                <div>
+                    <strong className="block mb-1 text-amber-800 dark:text-amber-300">{t('corsTitle')}</strong>
+                    <p className="text-amber-700 dark:text-amber-400/80 leading-snug mb-2">{t('corsDesc')}</p>
+                    <div className="flex flex-col gap-1 text-amber-800 dark:text-amber-400 opacity-90 text-xs">
+                        <span className="flex items-center gap-1.5"><CheckCircle size={10}/> {t('corsOption1')}</span>
+                        <span className="flex items-center gap-1.5"><CheckCircle size={10}/> {t('corsOption2')}</span>
+                    </div>
+                </div>
+            </div>
+         </div>
+      </Card>
 
       {/* Providers Grid */}
       <div className="grid md:grid-cols-3 gap-6 mb-8">
         {/* Google Config */}
-        <Card>
+        <Card className={!settings.google.enabled ? 'opacity-75' : ''}>
            <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <div className="w-2 h-8 bg-blue-500 rounded-full"></div>
                 Google Gemini
               </h3>
+              <Switch 
+                checked={settings.google.enabled} 
+                onChange={(v) => setSettings(s => ({...s, google: {...s.google, enabled: v}}))}
+              />
            </div>
-           <div className="space-y-4">
+           <div className={`space-y-4 ${!settings.google.enabled ? 'pointer-events-none opacity-50' : ''}`}>
               <Input 
                 label={t('baseUrl')} 
                 placeholder="https://generativelanguage..." 
                 value={settings.google.baseUrl} 
                 onChange={e=>setSettings({...settings, google:{...settings.google, baseUrl:e.target.value}})} 
                 icon={Link}
+                disabled={!settings.google.enabled}
               />
               <Input 
                 label={t('apiKey')} 
@@ -404,12 +476,14 @@ export default function App() {
                 value={settings.google.apiKey} 
                 onChange={e=>setSettings({...settings, google:{...settings.google, apiKey:e.target.value}})} 
                 icon={Key}
+                disabled={!settings.google.enabled}
               />
               <Button 
                 variant="secondary" 
                 className="w-full" 
                 onClick={()=>fetchModelsForProvider(Provider.GOOGLE)} 
                 icon={RefreshCw}
+                disabled={!settings.google.enabled}
               >
                 {t('fetchModels')}
               </Button>
@@ -417,20 +491,25 @@ export default function App() {
         </Card>
 
         {/* OpenAI Config */}
-        <Card>
+        <Card className={!settings.openai.enabled ? 'opacity-75' : ''}>
            <div className="flex items-center justify-between mb-4">
              <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <div className="w-2 h-8 bg-green-500 rounded-full"></div>
                 OpenAI
              </h3>
+             <Switch 
+                checked={settings.openai.enabled} 
+                onChange={(v) => setSettings(s => ({...s, openai: {...s.openai, enabled: v}}))}
+              />
            </div>
-           <div className="space-y-4">
+           <div className={`space-y-4 ${!settings.openai.enabled ? 'pointer-events-none opacity-50' : ''}`}>
               <Input 
                 label={t('baseUrl')} 
                 placeholder="https://api.openai.com/v1" 
                 value={settings.openai.baseUrl} 
                 onChange={e=>setSettings({...settings, openai:{...settings.openai, baseUrl:e.target.value}})} 
                 icon={Link}
+                disabled={!settings.openai.enabled}
               />
               <Input 
                 label={t('apiKey')} 
@@ -439,12 +518,14 @@ export default function App() {
                 value={settings.openai.apiKey} 
                 onChange={e=>setSettings({...settings, openai:{...settings.openai, apiKey:e.target.value}})} 
                 icon={Key}
+                disabled={!settings.openai.enabled}
               />
               <Button 
                 variant="secondary" 
                 className="w-full" 
                 onClick={()=>fetchModelsForProvider(Provider.OPENAI)} 
                 icon={RefreshCw}
+                disabled={!settings.openai.enabled}
               >
                 {t('fetchModels')}
               </Button>
@@ -452,20 +533,25 @@ export default function App() {
         </Card>
 
         {/* Anthropic Config */}
-        <Card>
+        <Card className={!settings.anthropic.enabled ? 'opacity-75' : ''}>
            <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <div className="w-2 h-8 bg-orange-500 rounded-full"></div>
                 Anthropic
               </h3>
+              <Switch 
+                checked={settings.anthropic.enabled} 
+                onChange={(v) => setSettings(s => ({...s, anthropic: {...s.anthropic, enabled: v}}))}
+              />
            </div>
-           <div className="space-y-4">
+           <div className={`space-y-4 ${!settings.anthropic.enabled ? 'pointer-events-none opacity-50' : ''}`}>
               <Input 
                 label={t('baseUrl')} 
                 placeholder="https://api.anthropic.com/v1" 
                 value={settings.anthropic.baseUrl} 
                 onChange={e=>setSettings({...settings, anthropic:{...settings.anthropic, baseUrl:e.target.value}})} 
                 icon={Link}
+                disabled={!settings.anthropic.enabled}
               />
               <Input 
                 label={t('apiKey')} 
@@ -474,9 +560,16 @@ export default function App() {
                 value={settings.anthropic.apiKey} 
                 onChange={e=>setSettings({...settings, anthropic:{...settings.anthropic, apiKey:e.target.value}})} 
                 icon={Key}
+                disabled={!settings.anthropic.enabled}
               />
-              <Button variant="secondary" disabled className="w-full opacity-50 cursor-not-allowed">
-                Fetch Not Supported
+              <Button 
+                variant="secondary" 
+                className="w-full" 
+                onClick={()=>fetchModelsForProvider(Provider.ANTHROPIC)} 
+                icon={RefreshCw}
+                disabled={!settings.anthropic.enabled}
+              >
+                {t('fetchModels')}
               </Button>
            </div>
         </Card>
@@ -559,9 +652,10 @@ export default function App() {
                      </tr>
                   )}
                   {availableModels.map((m) => (
-                     <tr key={m.id + m.provider} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group">
+                     <tr key={m.id + m.provider} className={`hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group ${!isProviderEnabled(m.provider) ? 'opacity-50 grayscale' : ''}`}>
                         <td className="p-4">
                           <Badge variant="neutral">{m.provider}</Badge>
+                          {!isProviderEnabled(m.provider) && <span className="ml-2 text-[10px] text-red-500 font-bold">(DISABLED)</span>}
                         </td>
                         <td className="p-4 font-mono text-xs text-slate-500 dark:text-slate-400">{m.id}</td>
                         <td className="p-4 flex items-center gap-2">
@@ -581,6 +675,273 @@ export default function App() {
       </Card>
     </div>
   );
+
+  const renderChat = () => {
+    // Filter models to only show enabled ones in the dropdown
+    const activeModels = availableModels.filter(m => isProviderEnabled(m.provider));
+    
+    return (
+    <div className="flex flex-col h-full max-w-4xl mx-auto w-full">
+      {/* Chat Header */}
+      <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm">
+         <div className="flex items-center gap-3 flex-1">
+            <div className="w-10 h-10 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg flex items-center justify-center">
+               <MessageSquare size={20} />
+            </div>
+            <div>
+               <h2 className="font-bold text-slate-900 dark:text-slate-100">{t('chatInterface')}</h2>
+               <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span className={`w-2 h-2 rounded-full ${activeModels.length > 0 ? 'bg-green-500' : 'bg-slate-300'}`}></span>
+                  {activeModels.length} models available
+               </div>
+            </div>
+         </div>
+         <div className="flex items-center gap-3">
+            <div className="w-64 hidden md:block">
+              <Select 
+                placeholder={activeModels.length > 0 ? t('selectModel') : "No enabled models"}
+                disabled={activeModels.length === 0}
+                options={activeModels.map(m => ({
+                    value: m.id, 
+                    label: m.name, 
+                    subLabel: m.provider,
+                    icon: m.provider === Provider.GOOGLE ? Zap : m.provider === Provider.OPENAI ? Activity : Globe
+                }))}
+                value={selectedModelId}
+                onChange={setSelectedModelId}
+              />
+            </div>
+            <Button variant="ghost" size="sm" icon={Trash2} onClick={() => setMessages([])}>
+              {t('clearChat')}
+            </Button>
+         </div>
+      </div>
+      
+      <div className="md:hidden px-4 py-2 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
+         <Select 
+            placeholder={activeModels.length > 0 ? t('selectModel') : "No enabled models"}
+            disabled={activeModels.length === 0}
+            options={activeModels.map(m => ({value: m.id, label: m.name}))}
+            value={selectedModelId}
+            onChange={setSelectedModelId}
+          />
+      </div>
+
+      {/* Messages Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 scroll-smooth">
+         {messages.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-600 opacity-50">
+               <MessageSquare size={64} strokeWidth={1.5} />
+               <p className="mt-4 text-lg font-medium">{t('typeMessage')}</p>
+            </div>
+         ) : (
+            messages.map((msg) => (
+              <div key={msg.id} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                 <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                    msg.role === 'user' ? 'bg-blue-600 text-white' : 
+                    msg.role === 'system' ? 'bg-red-100 text-red-600' :
+                    'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-300'
+                 }`}>
+                    {msg.role === 'user' ? <Send size={14}/> : <Zap size={14}/>}
+                 </div>
+                 <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                    <div className={`px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                       msg.role === 'user' 
+                         ? 'bg-blue-600 text-white rounded-tr-none' 
+                         : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-tl-none text-slate-800 dark:text-slate-200'
+                    }`}>
+                       {msg.content}
+                    </div>
+                    {msg.latency && (
+                       <span className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
+                          <Timer size={10}/> {msg.latency}ms • {msg.model}
+                       </span>
+                    )}
+                 </div>
+              </div>
+            ))
+         )}
+         {isGenerating && (
+           <div className="flex gap-4">
+              <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-300 flex items-center justify-center shrink-0 animate-pulse">
+                 <Zap size={14}/>
+              </div>
+              <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-4 py-3 rounded-2xl rounded-tl-none">
+                 <div className="flex gap-1">
+                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}}/>
+                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}}/>
+                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}}/>
+                 </div>
+              </div>
+           </div>
+         )}
+         <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input Area */}
+      <div className="p-4 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800">
+         <div className="relative">
+            <Textarea 
+               placeholder={t('typeMessage')}
+               value={input}
+               onChange={(e) => setInput(e.target.value)}
+               onKeyDown={(e) => {
+                  if(e.key === 'Enter' && !e.shiftKey) {
+                     e.preventDefault();
+                     handleSendMessage();
+                  }
+               }}
+               className="pr-12 max-h-32 min-h-[50px] py-3"
+               disabled={isGenerating}
+            />
+            <button 
+               onClick={handleSendMessage}
+               disabled={!input.trim() || isGenerating}
+               className="absolute right-2 bottom-2 p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 transition-colors"
+            >
+               {isGenerating ? <Activity size={18} className="animate-spin"/> : <Send size={18} />}
+            </button>
+         </div>
+      </div>
+    </div>
+  );
+  };
+
+  const renderSpeedTest = () => {
+     const stats = getSpeedStats();
+
+     const CustomTooltip = ({ active, payload }: any) => {
+        if (active && payload && payload.length) {
+           const data = payload[0].payload;
+           return (
+              <div className="bg-slate-900 border border-slate-700 p-3 rounded-lg shadow-xl text-xs z-50">
+                 <p className="font-bold text-white mb-2 border-b border-slate-700 pb-1">{data.model}</p>
+                 <div className="space-y-1.5">
+                    <div className="flex justify-between items-center gap-6">
+                       <span className="text-slate-400 flex items-center gap-1">
+                          <div className={`w-2 h-2 rounded-full ${data.latency < 500 ? 'bg-green-500' : data.latency < 1000 ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
+                          Total Latency
+                       </span>
+                       <span className="font-mono font-bold text-slate-200">
+                          {data.latency} ms
+                       </span>
+                    </div>
+                    {data.ttft > 0 && (
+                       <div className="flex justify-between items-center gap-6">
+                          <span className="text-slate-500 ml-3">TTFT</span>
+                          <span className="font-mono text-slate-400">{data.ttft} ms</span>
+                       </div>
+                    )}
+                 </div>
+                 <div className="mt-2 pt-2 border-t border-slate-800 text-[10px] text-slate-500 text-right uppercase tracking-wider">
+                    {data.provider}
+                 </div>
+              </div>
+           );
+        }
+        return null;
+     };
+
+     return (
+       <div className="p-6 max-w-6xl mx-auto h-full overflow-y-auto pb-20">
+         <header className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+               <h1 className="text-3xl font-bold text-slate-900 dark:text-white tracking-tight">{t('speedTestTitle')}</h1>
+               <p className="text-slate-500 dark:text-slate-400 mt-1">{t('speedTestDesc')}</p>
+            </div>
+            <Button onClick={runSpeedTest} icon={Activity} size="lg" isLoading={isTesting}>
+               {t('startBenchmark')}
+            </Button>
+         </header>
+         
+         {/* Summary Cards */}
+         {stats && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+               <Card className="bg-gradient-to-br from-blue-500 to-blue-600 border-none text-white">
+                  <div className="text-blue-100 text-xs font-medium uppercase mb-1">Avg Latency</div>
+                  <div className="text-3xl font-bold">{stats.avgLatency}<span className="text-lg opacity-80 font-normal">ms</span></div>
+               </Card>
+               <Card className="bg-gradient-to-br from-indigo-500 to-indigo-600 border-none text-white">
+                  <div className="text-indigo-100 text-xs font-medium uppercase mb-1">Avg TTFT</div>
+                  <div className="text-3xl font-bold">{stats.avgTtft}<span className="text-lg opacity-80 font-normal">ms</span></div>
+               </Card>
+               <Card className="bg-white dark:bg-slate-800">
+                  <div className="text-slate-500 text-xs font-medium uppercase mb-1">Fastest Model</div>
+                  <div className="text-lg font-bold truncate text-green-600 dark:text-green-400">{stats.fastest.model}</div>
+                  <div className="text-xs text-slate-400">{stats.fastest.latency}ms</div>
+               </Card>
+               <Card className="bg-white dark:bg-slate-800">
+                  <div className="text-slate-500 text-xs font-medium uppercase mb-1">Models Tested</div>
+                  <div className="text-3xl font-bold text-slate-900 dark:text-white">{stats.count}</div>
+               </Card>
+            </div>
+         )}
+
+         {/* Chart */}
+         {testResults.some(r => r.status === 'success') && (
+            <Card className="mb-8 h-64 p-2">
+               <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={testResults.filter(r => r.status === 'success')} layout="vertical" margin={{top: 5, right: 30, left: 20, bottom: 5}}>
+                     <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" opacity={0.2} />
+                     <XAxis type="number" hide />
+                     <YAxis dataKey="model" type="category" width={100} tick={{fontSize: 10, fill: '#94a3b8'}} />
+                     <Tooltip content={<CustomTooltip />} cursor={{fill: 'transparent'}} />
+                     <Bar dataKey="latency" name="Total Latency" fill="#3b82f6" radius={[0, 4, 4, 0]} barSize={20}>
+                        {testResults.filter(r => r.status === 'success').map((entry, index) => (
+                           <Cell key={`cell-${index}`} fill={entry.latency < 500 ? '#22c55e' : entry.latency < 1000 ? '#eab308' : '#ef4444'} />
+                        ))}
+                     </Bar>
+                  </BarChart>
+               </ResponsiveContainer>
+            </Card>
+         )}
+         
+         {/* Results Grid */}
+         <div className="grid md:grid-cols-2 gap-4">
+            {testResults.map(r => (
+               <div key={r.id} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 flex items-center gap-4 shadow-sm">
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 ${
+                     r.status === 'loading' ? 'bg-slate-100 dark:bg-slate-700' : 
+                     r.status === 'success' ? 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400' : 
+                     'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
+                  }`}>
+                     {r.status === 'loading' ? <Activity className="animate-spin" size={20}/> : 
+                      r.status === 'success' ? <CheckCircle size={20}/> : <AlertTriangle size={20}/>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                     <div className="flex items-center justify-between mb-1">
+                        <h4 className="font-semibold truncate text-slate-900 dark:text-white">{r.model}</h4>
+                        {r.status === 'success' && (
+                           <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                              r.latency < 500 ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400' : 
+                              r.latency < 1500 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400' : 
+                              'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400'
+                           }`}>
+                              {r.latency} ms
+                           </span>
+                        )}
+                     </div>
+                     <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                        <Badge variant="neutral">{r.provider}</Badge>
+                        {r.ttft && <span>TTFT: {r.ttft}ms</span>}
+                        {r.status === 'error' && <span className="text-red-500 truncate">{r.errorMsg}</span>}
+                     </div>
+                  </div>
+               </div>
+            ))}
+            {testResults.length === 0 && !isTesting && (
+               <div className="col-span-2 text-center py-12 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+                  <div className="w-16 h-16 bg-slate-50 dark:bg-slate-900 rounded-full flex items-center justify-center mx-auto mb-3 text-slate-400">
+                     <Activity size={32} />
+                  </div>
+                  <p className="text-slate-500">{t('speedTestDesc')}</p>
+                  <Button variant="outline" className="mt-4" onClick={runSpeedTest}>{t('startBenchmark')}</Button>
+               </div>
+            )}
+         </div>
+       </div>
+     );
+  };
 
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 font-sans transition-colors duration-300">
@@ -612,334 +973,52 @@ export default function App() {
       {/* Mobile Menu */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-50 bg-white dark:bg-slate-950/95 md:hidden flex flex-col p-6 animate-in fade-in duration-200">
-          <div className="flex justify-end mb-8"><button onClick={() => setMobileMenuOpen(false)} className="p-2 bg-slate-100 dark:bg-slate-800 rounded-full"><X size={24} /></button></div>
-          <nav className="space-y-4">
-            <Button variant={view === 'settings' ? 'primary' : 'ghost'} className="w-full justify-start text-lg h-14" onClick={() => {setView('settings'); setMobileMenuOpen(false)}} icon={SettingsIcon}>{t('settings')}</Button>
-            <Button variant={view === 'chat' ? 'primary' : 'ghost'} className="w-full justify-start text-lg h-14" onClick={() => {setView('chat'); setMobileMenuOpen(false)}} icon={MessageSquare}>{t('chat')}</Button>
-            <Button variant={view === 'speedtest' ? 'primary' : 'ghost'} className="w-full justify-start text-lg h-14" onClick={() => {setView('speedtest'); setMobileMenuOpen(false)}} icon={Activity}>{t('speedTest')}</Button>
-          </nav>
+          <div className="flex justify-end mb-8">
+            <button onClick={() => setMobileMenuOpen(false)} className="p-2 text-slate-500 hover:text-slate-900 dark:hover:text-slate-100">
+              <X size={24} />
+            </button>
+          </div>
+          <div className="space-y-2">
+            <SidebarItem active={view === 'settings'} icon={SettingsIcon} label={t('settings')} onClick={() => {setView('settings'); setMobileMenuOpen(false)}} />
+            <SidebarItem active={view === 'chat'} icon={MessageSquare} label={t('chat')} onClick={() => {setView('chat'); setMobileMenuOpen(false)}} />
+            <SidebarItem active={view === 'speedtest'} icon={Activity} label={t('speedTest')} onClick={() => {setView('speedtest'); setMobileMenuOpen(false)}} />
+          </div>
         </div>
       )}
 
-      <main className="flex-1 overflow-hidden relative flex flex-col bg-slate-50 dark:bg-slate-950">
-        {/* Top Bar Mobile */}
-        <div className="md:hidden p-4 border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur flex justify-between items-center z-20">
-           <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
-             <Zap size={20} className="text-blue-600"/> OmniBench
-           </div>
-           <button onClick={() => setMobileMenuOpen(true)} className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"><Menu size={24}/></button>
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+        {/* Mobile Header */}
+        <div className="md:hidden flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-10">
+          <div className="flex items-center gap-2">
+             <div className="w-8 h-8 bg-blue-600 text-white rounded-lg flex items-center justify-center">
+                <Zap size={18} fill="currentColor" />
+             </div>
+             <span className="font-bold text-slate-900 dark:text-white">OmniBench</span>
+          </div>
+          <button onClick={() => setMobileMenuOpen(true)} className="p-2 text-slate-600 dark:text-slate-300">
+            <Menu size={24} />
+          </button>
         </div>
 
-        {view === 'chat' && (
-            <div className="flex flex-col h-full relative">
-              {/* Chat Header */}
-              <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col md:flex-row gap-4 justify-between items-center bg-white/90 dark:bg-slate-900/90 backdrop-blur-md z-10 shadow-sm">
-                <div className="flex items-center gap-3 self-start md:self-center">
-                  <div className="p-2 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-lg">
-                    <MessageSquare size={20} />
-                  </div>
-                  <h2 className="font-bold text-slate-800 dark:text-slate-100 hidden md:block">{t('chatInterface')}</h2>
-                </div>
-                <div className="flex items-center gap-3 w-full md:w-auto">
-                   <div className="w-full md:w-[320px]">
-                     <Select 
-                       placeholder={t('selectModel')}
-                       options={availableModels.map(m => ({ 
-                         value: m.id, 
-                         label: m.name, 
-                         subLabel: `${m.provider} • ${m.id}` 
-                       }))}
-                       value={selectedModelId}
-                       onChange={setSelectedModelId}
-                     />
-                   </div>
-                   <Button 
-                     variant="danger" 
-                     size="md"
-                     onClick={() => setMessages([])} 
-                     title={t('clearChat')}
-                     className="aspect-square px-0 w-10"
-                     icon={Trash2}
-                   />
-                </div>
-              </div>
-
-              {/* Chat Area */}
-              <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-8 relative scroll-smooth">
-                {availableModels.length === 0 && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6">
-                        <div className="w-20 h-20 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-6">
-                           <SettingsIcon size={32} className="text-slate-400" />
-                        </div>
-                        <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-2">{t('noModels')}</h3>
-                        <p className="text-slate-500 dark:text-slate-400 max-w-md mb-6">You haven't configured any AI models yet. Head to settings to add API keys or custom models.</p>
-                        <Button onClick={() => setView('settings')}>
-                          {t('settings')}
-                        </Button>
-                    </div>
-                )}
-                
-                {messages.map((msg) => (
-                  <div key={msg.id} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-4 duration-500`}>
-                    <div className={`flex flex-col max-w-[90%] md:max-w-[80%] lg:max-w-[70%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                        <div className={`rounded-2xl p-5 shadow-sm relative ${
-                        msg.role === 'user' 
-                            ? 'bg-blue-600 text-white rounded-br-none' 
-                            : msg.role === 'system'
-                            ? 'bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 text-red-800 dark:text-red-200'
-                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 rounded-bl-none'
-                        }`}>
-                        {msg.role === 'assistant' && (
-                            <div className="flex items-center gap-2 mb-3 pb-3 border-b border-slate-100 dark:border-slate-700/50 text-[10px] font-bold tracking-widest uppercase opacity-70">
-                                <span className="text-blue-600 dark:text-blue-400">{msg.provider}</span>
-                                <span className="text-slate-300 dark:text-slate-600">•</span>
-                                <span>{msg.model}</span>
-                                {msg.latency && (
-                                    <span className="ml-auto flex items-center gap-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-1.5 py-0.5 rounded">
-                                        <Activity size={10}/> {msg.latency}ms
-                                    </span>
-                                )}
-                            </div>
-                        )}
-                        <div className="whitespace-pre-wrap text-sm md:text-base leading-relaxed tracking-wide font-light">{msg.content}</div>
-                        </div>
-                        <span className="text-[10px] text-slate-400 mt-1 px-1">
-                           {new Date(msg.timestamp).toLocaleTimeString()}
-                        </span>
-                    </div>
-                  </div>
-                ))}
-                
-                {isGenerating && (
-                  <div className="flex justify-start">
-                    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl rounded-bl-none p-4 flex items-center gap-2 shadow-sm">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{animationDelay: '300ms'}} />
-                    </div>
-                  </div>
-                )}
-                <div ref={messagesEndRef} className="h-4"/>
-              </div>
-
-              {/* Input Area */}
-              <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-20">
-                <div className="relative max-w-5xl mx-auto flex gap-3 items-end">
-                  <div className="flex-1 relative">
-                    <Textarea
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
-                        placeholder={t('typeMessage')}
-                        disabled={availableModels.length === 0}
-                        className="min-h-[56px] py-4 pr-14"
-                        rows={1}
-                    />
-                  </div>
-                  <Button 
-                    onClick={handleSendMessage}
-                    disabled={isGenerating || !input.trim() || availableModels.length === 0}
-                    className="h-[56px] w-[56px] rounded-xl shrink-0"
-                    icon={Send}
-                  />
-                </div>
-              </div>
-            </div>
-        )}
-
-        {view === 'speedtest' && (
-           <div className="p-6 md:p-10 max-w-[1600px] mx-auto h-full overflow-y-auto pb-24 w-full">
-             <header className="mb-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-               <div>
-                 <h1 className="text-4xl font-bold text-slate-900 dark:text-white mb-2 tracking-tight flex items-center gap-3">
-                    <Activity className="text-violet-600" size={32}/>
-                    {t('speedTestTitle')}
-                 </h1>
-                 <p className="text-lg text-slate-500 dark:text-slate-400">{t('speedTestDesc')}</p>
-               </div>
-               <div className="flex gap-4">
-                   <Button 
-                    onClick={runSpeedTest} 
-                    disabled={isTesting} 
-                    size="lg" 
-                    className="h-12 px-8 text-lg shadow-xl bg-violet-600 hover:bg-violet-700 shadow-violet-500/30"
-                    icon={Activity}
-                    >
-                    {isTesting ? t('running') : t('startBenchmark')}
-                    </Button>
-               </div>
-             </header>
-
-             {/* KPI Summary Cards - Only show if we have results */}
-             {testResults.length > 0 && getSpeedStats() && (
-               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10 animate-in fade-in slide-in-from-bottom-4">
-                 <div className="bg-white dark:bg-slate-800/50 p-6 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm flex items-center gap-4">
-                   <div className="p-3 bg-green-100 dark:bg-green-900/30 text-green-600 rounded-xl">
-                      <Trophy size={28} />
-                   </div>
-                   <div>
-                      <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Fastest Model</p>
-                      <p className="text-xl font-bold text-slate-900 dark:text-white mt-1 truncate max-w-[200px]">{getSpeedStats()!.fastest.model}</p>
-                      <p className="text-sm text-green-600 font-mono">{getSpeedStats()!.fastest.latency}ms</p>
-                   </div>
-                 </div>
-                 <div className="bg-white dark:bg-slate-800/50 p-6 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm flex items-center gap-4">
-                   <div className="p-3 bg-blue-100 dark:bg-blue-900/30 text-blue-600 rounded-xl">
-                      <Timer size={28} />
-                   </div>
-                   <div>
-                      <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Avg Latency</p>
-                      <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1">{getSpeedStats()!.avgLatency}<span className="text-sm font-normal text-slate-500 ml-1">ms</span></p>
-                   </div>
-                 </div>
-                 <div className="bg-white dark:bg-slate-800/50 p-6 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm flex items-center gap-4">
-                   <div className="p-3 bg-purple-100 dark:bg-purple-900/30 text-purple-600 rounded-xl">
-                      <BarChart2 size={28} />
-                   </div>
-                   <div>
-                      <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Avg TTFT</p>
-                      <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1">{getSpeedStats()!.avgTtft}<span className="text-sm font-normal text-slate-500 ml-1">ms</span></p>
-                   </div>
-                 </div>
-               </div>
-             )}
-
-             <div className="flex flex-col gap-8">
-               {/* Chart Section */}
-               <Card className="h-[500px] flex flex-col shadow-md p-6 md:p-8">
-                 <h3 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase mb-8">{t('latencyComp')}</h3>
-                 <div className="flex-1 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={testResults.filter(r=>r.status==='success')} layout="vertical" margin={{ left: 0, right: 50, top: 0, bottom: 0 }} barGap={8}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={settings.theme === 'light' ? '#e2e8f0' : '#334155'} horizontal={true} vertical={true} opacity={0.4} />
-                        <XAxis type="number" stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
-                        <YAxis dataKey="model" type="category" stroke="#94a3b8" width={180} fontSize={13} fontWeight={500} tickFormatter={(val) => val.length > 25 ? val.substring(0,25)+'...' : val} tickLine={false} axisLine={false} />
-                        <Tooltip 
-                            cursor={{fill: settings.theme === 'light' ? '#f1f5f9' : '#1e293b', opacity: 0.6}}
-                            content={({ active, payload }) => {
-                                if (active && payload && payload.length) {
-                                const data = payload[0].payload;
-                                return (
-                                    <div className="bg-slate-900/95 backdrop-blur-md text-white p-4 rounded-xl shadow-2xl text-sm border border-slate-700/50 min-w-[200px]">
-                                    <p className="font-bold text-lg mb-1">{data.model}</p>
-                                    <div className="flex items-center gap-2 mb-3">
-                                        <span className={`w-2 h-2 rounded-full ${data.provider===Provider.GOOGLE ? 'bg-blue-500' : data.provider===Provider.OPENAI ? 'bg-green-500' : 'bg-orange-500'}`}></span>
-                                        <span className="opacity-80 text-xs uppercase tracking-wider">{data.provider}</span>
-                                    </div>
-                                    <div className="space-y-2 pt-3 border-t border-slate-700/50">
-                                        <div className="flex justify-between gap-8">
-                                            <span className="text-slate-400">Total Latency:</span> 
-                                            <span className="font-mono font-bold text-green-400 text-base">{data.latency}ms</span>
-                                        </div>
-                                        {data.ttft && (
-                                            <div className="flex justify-between gap-8">
-                                                <span className="text-slate-400">First Token:</span> 
-                                                <span className="font-mono text-blue-400 text-base">{data.ttft}ms</span>
-                                            </div>
-                                        )}
-                                    </div>
-                                    </div>
-                                );
-                                }
-                                return null;
-                            }}
-                        />
-                        <Bar dataKey="latency" radius={[0, 6, 6, 0]} barSize={32} animationDuration={1000}>
-                            {testResults.filter(r=>r.status==='success').map((e, i) => (
-                                <Cell key={i} fill={e.provider===Provider.GOOGLE ? '#3b82f6' : e.provider===Provider.OPENAI ? '#22c55e' : '#f97316'} fillOpacity={0.9} />
-                            ))}
-                        </Bar>
-                        </BarChart>
-                    </ResponsiveContainer>
-                 </div>
-               </Card>
-               
-               {/* Detailed Stats Table */}
-               <Card className="flex flex-col overflow-hidden p-0 shadow-md border-0 ring-1 ring-slate-200 dark:ring-slate-800">
-                  <div className="p-6 border-b border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/50 flex justify-between items-center">
-                    <h3 className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase">Detailed Benchmark Results</h3>
-                    <span className="text-xs text-slate-400 font-mono bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">sorted by provider</span>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                        <thead className="bg-slate-50 dark:bg-slate-900/80 text-slate-500 dark:text-slate-400">
-                          <tr>
-                              <th className="p-6 font-medium w-[30%]">{t('modelId')}</th>
-                              <th className="p-6 font-medium w-[15%]">{t('status')}</th>
-                              <th className="p-6 font-medium w-[55%] text-right">Performance Visualization</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                        {testResults.length === 0 && (
-                            <tr>
-                                <td colSpan={3} className="p-16 text-center">
-                                    <div className="flex flex-col items-center gap-4 text-slate-400">
-                                        <Activity size={48} className="opacity-20" />
-                                        <p className="text-lg">No benchmark results yet</p>
-                                        <Button onClick={runSpeedTest} variant="secondary">Start First Test</Button>
-                                    </div>
-                                </td>
-                            </tr>
-                        )}
-                        {testResults.map((res) => (
-                            <tr key={res.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors group">
-                            <td className="p-6 align-middle">
-                                <div className="flex flex-col gap-1.5">
-                                    <span className="font-bold text-base text-slate-900 dark:text-slate-100">{res.model}</span>
-                                    <Badge variant="neutral">{res.provider}</Badge>
-                                </div>
-                            </td>
-                            <td className="p-6 align-middle">
-                                {res.status === 'success' && <Badge variant="success">{t('success')}</Badge>}
-                                {res.status === 'error' && <Badge variant="error">Error</Badge>}
-                                {res.status === 'loading' && <div className="flex items-center gap-2 text-amber-500 font-medium"><div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"/>{t('loading')}</div>}
-                                {res.status === 'error' && <div className="text-xs text-red-500 mt-2 font-mono bg-red-50 dark:bg-red-900/10 p-2 rounded">{res.errorMsg}</div>}
-                            </td>
-                            <td className="p-6 align-middle">
-                                {res.status === 'success' ? (
-                                    <div className="flex flex-col gap-3">
-                                        <div className="flex justify-end gap-8 items-baseline">
-                                            <div className="flex flex-col items-end">
-                                                <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">Time To First Token</span>
-                                                <span className="font-mono text-lg font-medium text-slate-700 dark:text-slate-300">{res.ttft}ms</span>
-                                            </div>
-                                            <div className="flex flex-col items-end">
-                                                <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">Total Latency</span>
-                                                <span className="font-mono text-xl font-bold text-green-600 dark:text-green-400">{res.latency}ms</span>
-                                            </div>
-                                        </div>
-                                        {/* Visual Bar */}
-                                        <div className="w-full h-3 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden flex justify-end relative">
-                                            <div 
-                                                className={`h-full rounded-full ${res.provider===Provider.GOOGLE ? 'bg-blue-500' : res.provider===Provider.OPENAI ? 'bg-green-500' : 'bg-orange-500'}`} 
-                                                style={{ width: `${Math.max((res.latency / maxLatency) * 100, 5)}%` }} 
-                                            />
-                                        </div>
-                                    </div>
-                                ) : <span className="text-slate-300 dark:text-slate-700 block text-right">-</span>}
-                            </td>
-                            </tr>
-                        ))}
-                        </tbody>
-                    </table>
-                  </div>
-               </Card>
-             </div>
-           </div>
-        )}
-        
-        {view === 'settings' && renderSettings()}
-        
+        {/* Feedback Toast */}
         {feedbackMsg && (
-           <div className={`fixed bottom-8 right-8 px-6 py-4 rounded-xl shadow-2xl z-50 text-sm flex items-center gap-3 border max-w-md animate-in slide-in-from-bottom-5 fade-in duration-300 ${
-             feedbackMsg.type === 'success' ? 'bg-slate-900 border-green-500/50 text-green-400' : 
-             feedbackMsg.type === 'error' ? 'bg-slate-900 border-red-500/50 text-red-400' :
-             'bg-slate-900 border-blue-500/50 text-blue-400'
-           }`}>
-             {feedbackMsg.type === 'error' ? <AlertTriangle size={20} className="shrink-0"/> : <CheckCircle size={20} className="shrink-0"/>}
-             <div className="font-medium">{feedbackMsg.msg}</div>
-           </div>
+          <div className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full shadow-xl border text-sm font-medium flex items-center gap-2 animate-in fade-in slide-in-from-top-4 ${
+            feedbackMsg.type === 'success' ? 'bg-green-50 dark:bg-green-900/80 text-green-700 dark:text-green-100 border-green-200 dark:border-green-800' :
+            feedbackMsg.type === 'error' ? 'bg-red-50 dark:bg-red-900/80 text-red-700 dark:text-red-100 border-red-200 dark:border-red-800' :
+            'bg-slate-800 text-white border-slate-700'
+          }`}>
+            {feedbackMsg.type === 'success' ? <CheckCircle size={14}/> : 
+             feedbackMsg.type === 'error' ? <AlertTriangle size={14}/> : 
+             <Info size={14}/>}
+            {feedbackMsg.msg}
+          </div>
         )}
+
+        {/* Views */}
+        {view === 'settings' && renderSettings()}
+        {view === 'chat' && renderChat()}
+        {view === 'speedtest' && renderSpeedTest()}
       </main>
     </div>
   );

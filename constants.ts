@@ -3,9 +3,13 @@ import { AppSettings, Provider, ModelOption } from './types';
 
 export const DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be concise and accurate.";
 
+// The default public proxy. Note: Public proxies are for testing. Production apps should use a dedicated backend.
+export const DEFAULT_CORS_PROXY = "https://corsproxy.io/?";
+
 export const DEFAULT_SETTINGS: AppSettings = {
   language: 'en',
   theme: 'dark',
+  corsProxy: DEFAULT_CORS_PROXY,
   google: {
     enabled: true,
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
@@ -44,6 +48,11 @@ export const TRANSLATIONS = {
     corsDesc: "Official endpoints (e.g., api.openai.com) usually block browser requests.",
     corsOption1: "Use a CORS-compatible Proxy URL.",
     corsOption2: "Manually add your model IDs below.",
+    networkTitle: "Network Settings",
+    proxyLabel: "CORS Proxy Prefix",
+    proxyDesc: "Prepends this URL to requests. Use the default public proxy or your own Cloudflare Worker.",
+    useDefault: "Use Default",
+    useDirect: "No Proxy (Direct)",
     fetchModels: "Fetch Models",
     baseUrl: "Base URL",
     apiKey: "API Key",
@@ -84,6 +93,11 @@ export const TRANSLATIONS = {
     corsDesc: "官方接口 (如 api.openai.com) 通常会阻止浏览器直接请求。",
     corsOption1: "使用支持 CORS 的代理地址作为 Base URL。",
     corsOption2: "在下方手动添加模型 ID。",
+    networkTitle: "网络设置",
+    proxyLabel: "CORS 代理前缀",
+    proxyDesc: "请求前缀。可使用默认的公共代理，或填入你自建的 Cloudflare Worker 地址。",
+    useDefault: "使用默认代理",
+    useDirect: "直连 (无代理)",
     fetchModels: "获取模型列表",
     baseUrl: "接口地址 (Base URL)",
     apiKey: "API 密钥 (Key)",

@@ -46,6 +46,7 @@ export interface ProviderConfig {
 export interface AppSettings {
   language: Language;
   theme: Theme;
+  corsProxy: string; // Global CORS proxy prefix
   google: ProviderConfig;
   openai: ProviderConfig;
   anthropic: ProviderConfig;

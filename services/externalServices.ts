@@ -1,3 +1,4 @@
+
 import { ModelOption, Provider } from '../types';
 
 // Helper to detect CORS/Network errors
@@ -31,8 +32,10 @@ export const fetchOpenAIModels = async (baseUrl: string, apiKey: string): Promis
     const data = await response.json();
     if (!data.data || !Array.isArray(data.data)) throw new Error("Invalid API response format");
 
+    // Modified: Accept ANY model ID to support custom proxies (OneAPI, LocalAI, etc.)
+    // that might serve Claude or other models via the OpenAI-compatible endpoint.
     return data.data
-      .filter((m: any) => m.id && (m.id.includes('gpt') || m.id.includes('o1') || m.id.includes('davinci'))) 
+      .filter((m: any) => m.id) 
       .map((m: any) => ({
         id: m.id,
         name: m.id,
@@ -122,6 +125,42 @@ export const generateOpenAIContent = async (
 };
 
 // --- Anthropic Services ---
+
+export const fetchAnthropicModels = async (baseUrl: string, apiKey: string): Promise<ModelOption[]> => {
+  if (!apiKey) throw new Error("API Key required");
+  
+  // Endpoint: GET https://api.anthropic.com/v1/models
+  const url = baseUrl.replace(/\/$/, "") + "/models";
+  
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        // "dangerously-allow-browser": "true" // Not usually needed for models endpoint if proxied, but good safety
+      }
+    });
+
+    if (!response.ok) {
+       const errorText = await response.text().catch(() => response.statusText);
+       throw new Error(`HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+    }
+    
+    const data = await response.json();
+    // Anthropic returns { data: [ { id: "...", type: "model", display_name: "..." } ] }
+    if (!data.data || !Array.isArray(data.data)) throw new Error("Invalid API response format");
+
+    return data.data
+      .map((m: any) => ({
+        id: m.id,
+        name: m.display_name || m.id,
+        provider: Provider.ANTHROPIC
+      }));
+  } catch (error: any) {
+    return handleFetchError(error, 'Anthropic');
+  }
+};
 
 export const generateAnthropicContent = async (
   baseUrl: string,
