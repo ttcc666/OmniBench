@@ -1,0 +1,5 @@
+{
+  "name": "OmniModel Bench",
+  "description": "A comprehensive testing suite for Gemini, OpenAI, and Claude APIs. Features include chat interface, model availability checks, and latency speed testing.",
+  "requestFramePermissions": []
+}
